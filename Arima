@@ -1,0 +1,291 @@
+
+required_packages <- c("quantmod", "forecast", "rugarch", "ggplot2")
+for (pkg in required_packages) {
+  if (!require(pkg, character.only = TRUE)) {
+    install.packages(pkg, dependencies = TRUE)
+    library(pkg, character.only = TRUE)
+  }
+}
+
+
+print("Required packages loaded successfully.")
+
+
+
+stock_ticker <- "AAPL" # Default stock ticker (e.g., Apple Inc.)
+start_date <- "2010-01-01"
+end_date <- Sys.Date() # Today's date
+
+
+cat(paste("\nFetching historical data for:", stock_ticker, "from", start_date, "to", end_date, "\n"))
+
+
+stock_data <- NULL
+tryCatch({
+  stock_data <- quantmod::getSymbols(stock_ticker, src = "yahoo",
+                                     from = start_date, to = end_date,
+                                     auto.assign = FALSE) # Important: auto.assign = FALSE
+
+  if (is.null(stock_data) || nrow(stock_data) == 0) {
+    stop("No data returned. Check ticker symbol or date range.")
+  }
+
+  
+  stock_prices <- quantmod::Ad(stock_data)
+  colnames(stock_prices) <- "Adjusted_Close" # Rename column for clarity
+
+  cat(paste("Successfully fetched", nrow(stock_prices), "data points for", stock_ticker, "\n"))
+  # print(head(stock_prices)) # Optional: print first few rows
+
+}, error = function(e) {
+  cat(paste("Error fetching data for", stock_ticker, ":", e$message, "\n"))
+  cat("Please check the stock ticker, date range, and your internet connection.\n")
+  # You might want to stop the script here or handle it differently
+  # stop(e$message)
+})
+
+
+if (exists("stock_prices") && !is.null(stock_prices) && nrow(stock_prices) > 0) {
+  # --- Data Preprocessing for Models ---
+  # Calculate daily log returns (often used for financial time series)
+  # na.omit removes NA values that result from the diff calculation (first value)
+  log_returns <- na.omit(diff(log(stock_prices)))
+  colnames(log_returns) <- "Log_Returns"
+
+  cat(paste("\nCalculated", nrow(log_returns), "log returns.\n"))
+  # print(head(log_returns)) # Optional: print first few log returns
+
+  # Plot historical prices (optional visualization)
+  # Ensure ggplot2 is loaded if you uncomment this
+  # if (require(ggplot2, quietly = TRUE) && require(scales, quietly = TRUE)) {
+  #   print(
+  #     ggplot(data.frame(Date = index(stock_prices), Price = coredata(stock_prices)), aes(x = Date, y = Price)) +
+  #       geom_line(color = "steelblue") +
+  #       labs(title = paste(stock_ticker, "Historical Prices"), x = "Date", y = "Adjusted Close Price") +
+  #       theme_minimal() +
+  #       scale_y_continuous(labels = scales::dollar_format())
+  #   )
+  # }
+
+  # --- ARIMA Model Forecasting ---
+
+  if (exists("log_returns") && !is.null(log_returns) && nrow(log_returns) > 0) {
+    cat("\n--- ARIMA Model Forecasting --- \n")
+
+    forecast_horizon_arima <- 30 # Number of periods to forecast ahead
+
+    # Fit auto.arima model to log returns
+    cat("Fitting ARIMA model to log returns...\n")
+    arima_model <- NULL
+    tryCatch({
+      arima_model <- forecast::auto.arima(log_returns,
+                                          stepwise = TRUE,    # Faster
+                                          trace = FALSE,      # Less output
+                                          approximation = TRUE) # Faster for long series
+
+      cat("ARIMA model fitting complete.\n")
+      print(summary(arima_model))
+
+      # Forecast log returns
+      cat(paste("\nForecasting log returns for the next", forecast_horizon_arima, "periods...\n"))
+      arima_forecast_log_returns <- forecast::forecast(arima_model, h = forecast_horizon_arima)
+
+      # --- Plotting ARIMA Forecast ---
+      # Plot the forecast of log returns
+      if (require(ggplot2, quietly = TRUE)) {
+        print(
+          autoplot(arima_forecast_log_returns) +
+            labs(title = paste(stock_ticker, "ARIMA Log Return Forecast"),
+                 x = "Time", y = "Log Returns") +
+            theme_minimal()
+        )
+        cat("Plotted ARIMA log return forecast.\n")
+      } else {
+        cat("ggplot2 not available for plotting ARIMA log return forecast. Plotting with base R graphics...\n")
+        plot(arima_forecast_log_returns, main = paste(stock_ticker, "ARIMA Log Return Forecast"))
+      }
+
+      # --- (Simplified) Conversion of Log Return Forecasts to Price Forecasts ---
+      # This is a common but simplified approach.
+      # For a more rigorous conversion, consider simulation or more complex methods.
+
+      last_price <- as.numeric(tail(stock_prices, 1))
+      forecasted_prices_arima <- numeric(forecast_horizon_arima)
+      current_forecasted_price <- last_price
+
+      for (i in 1:forecast_horizon_arima) {
+        # Assuming forecasted_log_return$mean[i] is the i-th step ahead point forecast for log return
+        current_forecasted_price <- current_forecasted_price * exp(arima_forecast_log_returns$mean[i])
+        forecasted_prices_arima[i] <- current_forecasted_price
+      }
+
+      # Create a data frame for plotting forecasted prices
+      last_date <- index(tail(stock_prices, 1))
+      forecast_dates_arima <- seq(from = last_date + 1, by = "days", length.out = forecast_horizon_arima)
+
+      # Adjust for weekends/holidays if necessary (simplification: using 'days')
+      # For actual trading days, a business day calendar would be needed.
+      # forecast_dates_arima <- forecast_dates_arima[wday(forecast_dates_arima) %in% 2:6] # Example: filter for weekdays
+      # forecast_dates_arima <- head(forecast_dates_arima, forecast_horizon_arima) # Ensure correct length
+
+      forecast_df_arima <- data.frame(
+        Date = forecast_dates_arima,
+        Forecasted_Price = forecasted_prices_arima
+      )
+
+      cat("\n(Simplified) ARIMA Price Forecasts:\n")
+      print(head(forecast_df_arima))
+
+      # Plot historical prices and ARIMA forecasted prices
+      if (require(ggplot2, quietly = TRUE) && require(scales, quietly = TRUE)) {
+        historical_df <- data.frame(Date = index(stock_prices), Price = coredata(stock_prices$Adjusted_Close))
+
+        print(
+          ggplot() +
+            geom_line(data = historical_df, aes(x = Date, y = Price, color = "Historical")) +
+            geom_line(data = forecast_df_arima, aes(x = Date, y = Forecasted_Price, color = "ARIMA Forecast")) +
+            labs(title = paste(stock_ticker, "Price Forecast with ARIMA"),
+                 x = "Date", y = "Price") +
+            scale_color_manual(values = c("Historical" = "steelblue", "ARIMA Forecast" = "orange")) +
+            theme_minimal() +
+            scale_y_continuous(labels = scales::dollar_format())
+        )
+        cat("Plotted historical prices and ARIMA price forecast using ggplot2.\n")
+      } else {
+        cat("ggplot2 not available. Skipping combined price forecast plot for ARIMA.\n")
+      }
+
+    }, error = function(e) {
+      cat(paste("Error during ARIMA modeling or forecasting for", stock_ticker, ":", e$message, "\n"))
+    })
+
+  } else {
+    cat("\nSkipping ARIMA modeling due to missing log returns data.\n")
+  }
+
+  # --- GARCH Model Forecasting ---
+
+  if (exists("log_returns") && !is.null(log_returns) && nrow(log_returns) > 0) {
+    cat("\n--- GARCH Model Forecasting --- \n")
+
+    forecast_horizon_garch <- 30 # Number of periods to forecast ahead
+
+    # Define GARCH model specification (e.g., GARCH(1,1) with sGARCH model)
+    # Mean model: ARMA(1,1) is common, but can be adjusted or set to constant mean.
+    # For simplicity, let's use an ARMA(1,1) mean model.
+    # You might need to experiment with different orders or distributions.
+    garch_spec <- ugarchspec(
+      variance.model = list(model = "sGARCH", garchOrder = c(1, 1)),
+      mean.model = list(armaOrder = c(1, 1), include.mean = TRUE),
+      distribution.model = "norm" # "std" or "sstd" for fatter tails
+    )
+
+    cat("Fitting GARCH model to log returns...\n")
+    # Ensure log_returns is a time series object or a numeric vector for ugarchfit
+    # If log_returns is an xts object, convert it:
+    log_returns_vector <- as.numeric(coredata(log_returns$Log_Returns))
+
+    garch_fit <- NULL
+    tryCatch({
+      garch_fit <- ugarchfit(spec = garch_spec, data = log_returns_vector, solver = 'hybrid')
+
+      if (is.null(garch_fit) || !inherits(garch_fit, "uGARCHfit")) {
+          stop("GARCH model fitting failed or returned an unexpected object.")
+      }
+      cat("GARCH model fitting complete.\n")
+      # print(garch_fit) # Detailed output of the GARCH fit
+
+      # Forecast from GARCH model
+      cat(paste("\nForecasting with GARCH model for the next", forecast_horizon_garch, "periods...\n"))
+      garch_forecast <- ugarchforecast(garch_fit, n.ahead = forecast_horizon_garch)
+
+      # The garch_forecast object contains forecasts for both the series (mean) and sigma (volatility)
+      # print(garch_forecast) # To see the structure
+
+      # Extract forecasted conditional volatility (sigma)
+      forecasted_sigma_garch <- sigma(garch_forecast)
+      # Extract forecasted conditional mean (returns)
+      forecasted_mean_garch <- fitted(garch_forecast) # These are the forecasted log returns
+
+      # --- Plotting GARCH Volatility Forecast ---
+      # Create dates for the forecast horizon
+      last_date_log_returns <- index(tail(log_returns, 1))
+      forecast_dates_garch_vol <- seq(from = last_date_log_returns + 1, by = "days", length.out = forecast_horizon_garch)
+
+      # Adjust for weekends/holidays for plotting if necessary (simplification: using 'days')
+      # forecast_dates_garch_vol <- forecast_dates_garch_vol[wday(forecast_dates_garch_vol) %in% 2:6]
+      # forecast_dates_garch_vol <- head(forecast_dates_garch_vol, forecast_horizon_garch)
+
+      vol_forecast_df <- data.frame(
+          Date = forecast_dates_garch_vol,
+          Sigma = as.numeric(forecasted_sigma_garch)
+      )
+
+      if (require(ggplot2, quietly = TRUE)) {
+        print(
+          ggplot(vol_forecast_df, aes(x = Date, y = Sigma)) +
+            geom_line(color = "blue") +
+            labs(title = paste(stock_ticker, "GARCH Conditional Volatility (Sigma) Forecast"),
+                 x = "Date", y = "Forecasted Conditional Volatility") +
+            theme_minimal()
+        )
+        cat("Plotted GARCH conditional volatility forecast using ggplot2.\n")
+      } else {
+        cat("ggplot2 not available. Plotting GARCH volatility with base R graphics...\n")
+        plot(forecast_dates_garch_vol, as.numeric(forecasted_sigma_garch), type = 'l',
+             main = paste(stock_ticker, "GARCH Volatility Forecast"), xlab = "Date", ylab = "Sigma")
+      }
+
+      # --- (Simplified) Conversion of GARCH Mean Forecasts to Price Forecasts ---
+      # Similar to ARIMA, this is a simplified approach for price forecasting from mean returns.
+      last_price_garch <- as.numeric(tail(stock_prices, 1))
+      forecasted_prices_garch <- numeric(forecast_horizon_garch)
+      current_forecasted_price_garch <- last_price_garch
+
+      for (i in 1:forecast_horizon_garch) {
+        current_forecasted_price_garch <- current_forecasted_price_garch * exp(forecasted_mean_garch[i])
+        forecasted_prices_garch[i] <- current_forecasted_price_garch
+      }
+
+      forecast_df_garch_price <- data.frame(
+        Date = forecast_dates_garch_vol, # Re-using the dates from volatility forecast
+        Forecasted_Price = forecasted_prices_garch
+      )
+
+      cat("\n(Simplified) GARCH Price Forecasts (based on mean model):\n")
+      print(head(forecast_df_garch_price))
+
+      # Plot historical prices and GARCH forecasted prices
+      if (require(ggplot2, quietly = TRUE) && require(scales, quietly = TRUE)) {
+        historical_df_garch <- data.frame(Date = index(stock_prices), Price = coredata(stock_prices$Adjusted_Close))
+
+        print(
+          ggplot() +
+            geom_line(data = historical_df_garch, aes(x = Date, y = Price, color = "Historical")) +
+            geom_line(data = forecast_df_garch_price, aes(x = Date, y = Forecasted_Price, color = "GARCH Forecast")) +
+            labs(title = paste(stock_ticker, "Price Forecast with GARCH Mean"),
+                 x = "Date", y = "Price") +
+            scale_color_manual(values = c("Historical" = "steelblue", "GARCH Forecast" = "darkgreen")) +
+            theme_minimal() +
+            scale_y_continuous(labels = scales::dollar_format())
+        )
+        cat("Plotted historical prices and GARCH price forecast using ggplot2.\n")
+      } else {
+        cat("ggplot2 not available. Skipping combined price forecast plot for GARCH.\n")
+      }
+
+    }, error = function(e) {
+      cat(paste("Error during GARCH modeling or forecasting for", stock_ticker, ":", e$message, "\n"))
+      cat("GARCH models can be sensitive to data and model specification. Try different armaOrder, garchOrder, or distribution.model if issues persist.\n")
+    })
+
+  } else {
+    cat("\nSkipping GARCH modeling due to missing log returns data.\n")
+  }
+
+  # End of the main if block for data availability
+  cat("\n--- Script End --- \n")
+
+} else {
+  cat("\nSkipping modeling due to data fetching issues.\n")
+}
